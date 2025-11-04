@@ -81,10 +81,16 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
     }
 
     private fun openDirectory(isSource: Boolean) {
-        Log.d("MainActivity", "Opening directory picker for $sourceDirUri $destDirUri")
-        val initialUri = DocumentsContract.buildDocumentUri(
-            "com.android.externalstorage.documents", DocumentsContract.getTreeDocumentId(if (isSource) sourceDirUri else destDirUri)
-        )
+
+        val requestDirUri = if (isSource) sourceDirUri else destDirUri
+        Log.d("MainActivity", "Current directory URI: $requestDirUri")
+
+        val initialUri = requestDirUri?.let{
+            DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", DocumentsContract.getTreeDocumentId(requestDirUri))
+        }
+
+        sourceDirUri
         isSourceSelected = isSource
         folderPickerLauncher.launch(initialUri)
     }
