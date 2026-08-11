@@ -1,9 +1,12 @@
 package com.appx.syncmedia
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.util.Log
@@ -15,12 +18,9 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import androidx.core.content.ContextCompat
 
-class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var sourceDirTextView: TextView
     private lateinit var destDirTextView: TextView
@@ -34,6 +34,14 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
 
     private lateinit var sharedPreferences: SharedPreferences
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (!isGranted) {
+            Toast.makeText(this, "Notification permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private val folderPickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
         if (treeUri != null) {
             val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -41,11 +49,11 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
             contentResolver.takePersistableUriPermission(treeUri, takeFlags)
             Log.d("MainActivity", "Directory URI: $treeUri")
             if (isSourceSelected) {
-                sourceDirUri = treeUri // Correct: Store the treeUri directly
+                sourceDirUri = treeUri
                 saveUri(KEY_SOURCE_DIR, treeUri)
                 sourceDirTextView.text = "Source: ${getDisplayablePath(treeUri)}"
             } else {
-                destDirUri = treeUri // Correct: Store the treeUri directly
+                destDirUri = treeUri
                 saveUri(KEY_DEST_DIR, treeUri)
                 destDirTextView.text = "Destination: ${getDisplayablePath(treeUri)}"
             }
@@ -63,6 +71,7 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
         syncButton = findViewById(R.id.syncButton)
         progressBar = findViewById(R.id.progressBar)
 
+        ensureNotificationPermissionIfNeeded()
         loadSavedUris()
 
         val selectSourceDirButton: Button = findViewById(R.id.selectSourceDirButton)
@@ -85,12 +94,12 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
         val requestDirUri = if (isSource) sourceDirUri else destDirUri
         Log.d("MainActivity", "Current directory URI: $requestDirUri")
 
-        val initialUri = requestDirUri?.let{
+        val initialUri = requestDirUri?.let {
             DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents", DocumentsContract.getTreeDocumentId(requestDirUri))
+                "com.android.externalstorage.documents", DocumentsContract.getTreeDocumentId(requestDirUri)
+            )
         }
 
-        sourceDirUri
         isSourceSelected = isSource
         folderPickerLauncher.launch(initialUri)
     }
@@ -101,20 +110,14 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
             val destDir = DocumentFile.fromTreeUri(this, destDirUri!!)
 
             if (sourceDir != null && destDir != null) {
-                syncButton.isEnabled = false
-                progressBar.visibility = View.VISIBLE
-
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        FileSyncer().sync(this@MainActivity, sourceDir, destDir, this@MainActivity)
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            e.printStackTrace()
-                            Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-                            onSyncComplete()
-                        }
-                    }
-                }
+                val serviceIntent = SyncForegroundService.createStartIntent(
+                    this,
+                    sourceDirUri!!,
+                    destDirUri!!
+                )
+                ContextCompat.startForegroundService(this, serviceIntent)
+                progressBar.visibility = View.GONE
+                Toast.makeText(this, "Sync started in background", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "Invalid directories selected", Toast.LENGTH_SHORT).show()
             }
@@ -123,17 +126,18 @@ class MainActivity : AppCompatActivity(), FileSyncer.SyncProgressListener {
         }
     }
 
-    override fun onProgressUpdate(progress: Int) {
-        runOnUiThread {
-            progressBar.progress = progress
+    private fun ensureNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
         }
-    }
 
-    override fun onSyncComplete() {
-        runOnUiThread {
-            syncButton.isEnabled = true
-            progressBar.visibility = View.GONE
-            Toast.makeText(this, "Sync complete!", Toast.LENGTH_SHORT).show()
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!granted) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 

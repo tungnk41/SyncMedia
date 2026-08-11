@@ -19,8 +19,6 @@ class FileSyncer {
     fun sync(context: Context, sourceDir: DocumentFile, destDir: DocumentFile, listener: SyncProgressListener) {
         Log.d(TAG, "Starting sync from ${sourceDir.uri} to ${destDir.uri}")
 
-        deleteDirectoryContents(destDir)
-
         totalFiles = countFiles(sourceDir)
         copiedFiles = 0
         if (totalFiles == 0) {
@@ -28,20 +26,18 @@ class FileSyncer {
             return
         }
 
-        copyDirectory(context, sourceDir, destDir, listener)
+        syncDirectory(context, sourceDir, destDir, listener)
         listener.onSyncComplete()
         Log.d(TAG, "Sync finished")
     }
 
-    private fun deleteDirectoryContents(dir: DocumentFile) {
-        if (dir.isDirectory) {
-            for (file in dir.listFiles()) {
-                if (file.isDirectory) {
-                    deleteDirectoryContents(file)
-                }
-                file.delete()
+    private fun deleteRecursively(file: DocumentFile) {
+        if (file.isDirectory) {
+            for (child in file.listFiles()) {
+                deleteRecursively(child)
             }
         }
+        file.delete()
     }
 
     private fun countFiles(dir: DocumentFile): Int {
@@ -59,38 +55,62 @@ class FileSyncer {
     }
 
     @Throws(IOException::class)
-    private fun copyDirectory(context: Context, source: DocumentFile, destination: DocumentFile, listener: SyncProgressListener) {
+    private fun syncDirectory(context: Context, source: DocumentFile, destination: DocumentFile, listener: SyncProgressListener) {
         if (!source.isDirectory) {
             return
         }
 
+        val sourceEntriesByName = source
+            .listFiles()
+            .mapNotNull { entry -> entry.name?.let { it to entry } }
+            .toMap()
+
+        for (destEntry in destination.listFiles()) {
+            val destName = destEntry.name ?: continue
+            val sourceEntry = sourceEntriesByName[destName]
+
+            if (sourceEntry == null) {
+                Log.d(TAG, "Deleting extra entry in destination: $destName")
+                deleteRecursively(destEntry)
+                continue
+            }
+
+            if (destEntry.isDirectory != sourceEntry.isDirectory) {
+                Log.d(TAG, "Type mismatch for '$destName', deleting destination entry")
+                deleteRecursively(destEntry)
+            }
+        }
+
         for (file in source.listFiles()) {
-            val existingFile = destination.findFile(file.name!!)
+            val fileName = file.name ?: continue
+            val existingFile = destination.findFile(fileName)
             val targetFile: DocumentFile?
 
             if (file.isDirectory) {
                 targetFile = if (existingFile != null) {
                     if (!existingFile.isDirectory) {
-                        Log.e(TAG, "Conflict: File exists with same name as directory '${file.name}'")
-                        continue
+                        deleteRecursively(existingFile)
+                        destination.createDirectory(fileName)
+                    } else {
+                        existingFile
                     }
-                    existingFile
                 } else {
-                    destination.createDirectory(file.name!!)
+                    destination.createDirectory(fileName)
                 }
 
                 if (targetFile != null) {
-                    copyDirectory(context, file, targetFile, listener)
+                    syncDirectory(context, file, targetFile, listener)
                 }
             } else { // It's a file
                 targetFile = if (existingFile != null) {
                     if (existingFile.isDirectory) {
-                        Log.e(TAG, "Conflict: Directory exists with same name as file '${file.name}'")
-                        continue
+                        deleteRecursively(existingFile)
+                        destination.createFile(file.type ?: "application/octet-stream", fileName)
+                    } else {
+                        existingFile
                     }
-                    existingFile
                 } else {
-                    destination.createFile(file.type ?: "application/octet-stream", file.name!!)
+                    destination.createFile(file.type ?: "application/octet-stream", fileName)
                 }
 
                 if (targetFile != null) {
