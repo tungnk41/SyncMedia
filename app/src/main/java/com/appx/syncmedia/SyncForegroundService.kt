@@ -1,5 +1,6 @@
 package com.appx.syncmedia
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,10 +8,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.widget.Toast
+import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.documentfile.provider.DocumentFile
@@ -25,6 +29,10 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fileSyncer = FileSyncer()
 
+    private var sourceName: String = "source"
+    private var destName: String = "destination"
+
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
 
@@ -37,7 +45,7 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
             return START_NOT_STICKY
         }
 
-        startAsForeground(buildProgressNotification(0))
+        startAsForeground(buildProgressNotification(0, 0, 0))
 
         serviceScope.launch {
             try {
@@ -52,6 +60,9 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
                     return@launch
                 }
 
+                sourceName = sourceDir.name ?: "source"
+                destName = destDir.name ?: "destination"
+
                 fileSyncer.sync(this@SyncForegroundService, sourceDir, destDir, this@SyncForegroundService)
             } catch (e: Exception) {
                 Log.e(TAG, "Sync failed", e)
@@ -63,18 +74,28 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
         return START_NOT_STICKY
     }
 
-    override fun onProgressUpdate(progress: Int) {
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    override fun onProgressUpdate(progress: Int, current: Int, total: Int) {
         NotificationManagerCompat.from(this).notify(
             NOTIFICATION_PROGRESS_ID,
-            buildProgressNotification(progress)
+            buildProgressNotification(progress, current, total)
         )
     }
 
-    override fun onSyncComplete() {
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    override fun onSyncComplete(synced: Int, total: Int) {
+        serviceScope.launch(Dispatchers.Main) {
+            val message = if (synced == total) {
+                "Sync complete! All $total files have been copied to $destName"
+            } else {
+                "Sync finished. $synced of $total files were copied to $destName"
+            }
+            Toast.makeText(this@SyncForegroundService, message, Toast.LENGTH_LONG).show()
+        }
         val completeNotification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("Sync complete")
-            .setContentText("All files have been synchronized")
+            .setContentText("Synced $synced of $total files from $sourceName to $destName")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
             .setContentIntent(createMainActivityPendingIntent())
@@ -94,17 +115,22 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
 
     private fun startAsForeground(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_PROGRESS_ID, notification, ServiceInfoCompat.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(NOTIFICATION_PROGRESS_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_PROGRESS_ID, notification)
         }
     }
 
-    private fun buildProgressNotification(progress: Int): Notification {
+    private fun buildProgressNotification(progress: Int, current: Int, total: Int): Notification {
+        val contentText = if (total > 0) {
+            "Synchronizing files... $current/$total ($progress%)"
+        } else {
+            "Synchronizing files... $progress%"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("Sync in progress")
-            .setContentText("Synchronizing files... $progress%")
+            .setContentText(contentText)
             .setProgress(100, progress.coerceIn(0, 100), false)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -112,7 +138,11 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
             .build()
     }
 
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
     private fun notifyFailure(message: String) {
+        serviceScope.launch(Dispatchers.Main) {
+            Toast.makeText(this@SyncForegroundService, "Sync failed: $message", Toast.LENGTH_LONG).show()
+        }
         val failedNotification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setContentTitle("Sync failed")

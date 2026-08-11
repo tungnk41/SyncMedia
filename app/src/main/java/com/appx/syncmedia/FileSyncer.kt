@@ -8,27 +8,25 @@ import java.io.IOException
 class FileSyncer {
 
     interface SyncProgressListener {
-        fun onProgressUpdate(progress: Int)
-        fun onSyncComplete()
+        fun onProgressUpdate(progress: Int, current: Int, total: Int)
+        fun onSyncComplete(synced: Int, total: Int)
     }
 
-    private var totalFiles = 0
-    private var copiedFiles = 0
+    private data class SyncContext(
+        val totalFiles: Int,
+        var copiedFiles: Int = 0
+    )
 
     @Throws(IOException::class)
     fun sync(context: Context, sourceDir: DocumentFile, destDir: DocumentFile, listener: SyncProgressListener) {
         Log.d(TAG, "Starting sync from ${sourceDir.uri} to ${destDir.uri}")
 
-        totalFiles = countFiles(sourceDir)
-        copiedFiles = 0
-        if (totalFiles == 0) {
-            listener.onSyncComplete()
-            return
-        }
+        val totalFiles = countFiles(sourceDir, destDir)
+        val syncContext = SyncContext(totalFiles)
 
-        syncDirectory(context, sourceDir, destDir, listener)
-        listener.onSyncComplete()
-        Log.d(TAG, "Sync finished")
+        syncDirectory(context, sourceDir, destDir, listener, syncContext)
+        listener.onSyncComplete(syncContext.copiedFiles, totalFiles)
+        Log.d(TAG, "Sync finished. Copied ${syncContext.copiedFiles} of $totalFiles files.")
     }
 
     private fun deleteRecursively(file: DocumentFile) {
@@ -40,14 +38,23 @@ class FileSyncer {
         file.delete()
     }
 
-    private fun countFiles(dir: DocumentFile): Int {
+    private fun countFiles(sourceDir: DocumentFile, destDir: DocumentFile? = null): Int {
         var count = 0
-        if (dir.isDirectory) {
-            for (file in dir.listFiles()) {
+        if (sourceDir.isDirectory) {
+            val destFilesByName = destDir?.listFiles()?.associateBy { it.name } ?: emptyMap()
+
+            for (file in sourceDir.listFiles()) {
+                if (isHidden(file)) continue
+                val fileName = file.name ?: continue
+
                 if (file.isDirectory) {
-                    count += countFiles(file)
+                    val existingDestDir = destFilesByName[fileName]?.takeIf { it.isDirectory }
+                    count += countFiles(file, existingDestDir)
                 } else {
-                    count++
+                    val existingFile = destFilesByName[fileName]
+                    if (existingFile == null || existingFile.isDirectory) {
+                        count++
+                    }
                 }
             }
         }
@@ -55,18 +62,26 @@ class FileSyncer {
     }
 
     @Throws(IOException::class)
-    private fun syncDirectory(context: Context, source: DocumentFile, destination: DocumentFile, listener: SyncProgressListener) {
+    private fun syncDirectory(
+        context: Context,
+        source: DocumentFile,
+        destination: DocumentFile,
+        listener: SyncProgressListener,
+        syncContext: SyncContext
+    ) {
         if (!source.isDirectory) {
             return
         }
 
         val sourceEntriesByName = source
             .listFiles()
+            .filter { !isHidden(it) }
             .mapNotNull { entry -> entry.name?.let { it to entry } }
             .toMap()
 
         for (destEntry in destination.listFiles()) {
             val destName = destEntry.name ?: continue
+            if (destName.startsWith(".")) continue
             val sourceEntry = sourceEntriesByName[destName]
 
             if (sourceEntry == null) {
@@ -83,6 +98,7 @@ class FileSyncer {
 
         for (file in source.listFiles()) {
             val fileName = file.name ?: continue
+            if (isHidden(file)) continue
             val existingFile = destination.findFile(fileName)
             val targetFile: DocumentFile?
 
@@ -95,11 +111,14 @@ class FileSyncer {
                         existingFile
                     }
                 } else {
+                    Log.i(TAG, "Creating directory: $fileName")
                     destination.createDirectory(fileName)
                 }
 
                 if (targetFile != null) {
-                    syncDirectory(context, file, targetFile, listener)
+                    syncDirectory(context, file, targetFile, listener, syncContext)
+                } else {
+                    Log.e(TAG, "Failed to create or access directory: $fileName")
                 }
             } else { // It's a file
                 targetFile = if (existingFile != null) {
@@ -114,23 +133,45 @@ class FileSyncer {
                 }
 
                 if (targetFile != null) {
-                    copyFile(context, file, targetFile, listener)
+                    val alreadyExists = existingFile != null && !existingFile.isDirectory
+                    if (alreadyExists) {
+                        Log.i(TAG, "Skipped (already exists): $fileName")
+                    } else {
+                        copyFile(context, file, targetFile, listener, syncContext)
+                    }
+                } else {
+                    Log.e(TAG, "Failed to create or access file: $fileName")
                 }
             }
         }
     }
 
     @Throws(IOException::class)
-    private fun copyFile(context: Context, source: DocumentFile, destination: DocumentFile, listener: SyncProgressListener) {
-        Log.d(TAG, "Copying file from ${source.uri} to ${destination.uri}")
-        context.contentResolver.openInputStream(source.uri)?.use { inputStream ->
-            context.contentResolver.openOutputStream(destination.uri)?.use { outputStream ->
-                inputStream.copyTo(outputStream)
-                copiedFiles++
-                val progress = (copiedFiles * 100 / totalFiles)
-                listener.onProgressUpdate(progress)
-            }
+    private fun copyFile(
+        context: Context,
+        source: DocumentFile,
+        destination: DocumentFile,
+        listener: SyncProgressListener,
+        syncContext: SyncContext
+    ) {
+        val fileName = source.name ?: "unknown"
+        try {
+            context.contentResolver.openInputStream(source.uri)?.use { inputStream ->
+                context.contentResolver.openOutputStream(destination.uri)?.use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                    syncContext.copiedFiles++
+                    Log.i(TAG, "[${syncContext.copiedFiles}/${syncContext.totalFiles}] Synced: $fileName")
+                    val progress = (syncContext.copiedFiles * 100 / syncContext.totalFiles)
+                    listener.onProgressUpdate(progress, syncContext.copiedFiles, syncContext.totalFiles)
+                } ?: Log.e(TAG, "Could not open output stream for $fileName")
+            } ?: Log.e(TAG, "Could not open input stream for $fileName")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy file $fileName", e)
         }
+    }
+
+    private fun isHidden(file: DocumentFile): Boolean {
+        return file.name?.startsWith(".") == true
     }
 
     companion object {
