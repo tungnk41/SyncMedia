@@ -1,8 +1,10 @@
 package com.appx.syncmedia
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.net.Uri
@@ -26,6 +28,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var destDirTextView: TextView
     private lateinit var syncButton: Button
     private lateinit var progressBar: ProgressBar
+    private lateinit var syncProgressContainer: View
+    private lateinit var syncStatusTextView: TextView
+    private lateinit var syncCountTextView: TextView
 
     private var sourceDirUri: Uri? = null
     private var destDirUri: Uri? = null
@@ -33,6 +38,35 @@ class MainActivity : AppCompatActivity() {
 
 
     private lateinit var sharedPreferences: SharedPreferences
+
+    private val syncReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                SyncForegroundService.ACTION_SYNC_STARTED -> {
+                    syncProgressContainer.visibility = View.VISIBLE
+                    syncStatusTextView.text = "Checking files..."
+                    syncCountTextView.text = ""
+                    progressBar.isIndeterminate = true
+                }
+                SyncForegroundService.ACTION_SYNC_PROGRESS -> {
+                    val current = intent.getIntExtra(SyncForegroundService.EXTRA_CURRENT, 0)
+                    val total = intent.getIntExtra(SyncForegroundService.EXTRA_TOTAL, 0)
+
+                    syncProgressContainer.visibility = View.VISIBLE
+                    syncStatusTextView.text = "Synchronizing..."
+                    syncCountTextView.text = "$current/$total"
+                    progressBar.isIndeterminate = false
+                    if (total > 0) {
+                        progressBar.max = total
+                        progressBar.progress = current
+                    }
+                }
+                SyncForegroundService.ACTION_SYNC_COMPLETE -> {
+                    syncProgressContainer.visibility = View.GONE
+                }
+            }
+        }
+    }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -70,6 +104,9 @@ class MainActivity : AppCompatActivity() {
         destDirTextView = findViewById(R.id.destDirTextView)
         syncButton = findViewById(R.id.syncButton)
         progressBar = findViewById(R.id.progressBar)
+        syncProgressContainer = findViewById(R.id.syncProgressContainer)
+        syncStatusTextView = findViewById(R.id.syncStatusTextView)
+        syncCountTextView = findViewById(R.id.syncCountTextView)
 
         ensureNotificationPermissionIfNeeded()
         loadSavedUris()
@@ -87,6 +124,28 @@ class MainActivity : AppCompatActivity() {
         syncButton.setOnClickListener {
             syncFiles()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!SyncForegroundService.isServiceRunning) {
+            syncProgressContainer.visibility = View.GONE
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(SyncForegroundService.ACTION_SYNC_STARTED)
+            addAction(SyncForegroundService.ACTION_SYNC_PROGRESS)
+            addAction(SyncForegroundService.ACTION_SYNC_COMPLETE)
+        }
+        ContextCompat.registerReceiver(this, syncReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(syncReceiver)
     }
 
     private fun openDirectory(isSource: Boolean) {
@@ -116,7 +175,9 @@ class MainActivity : AppCompatActivity() {
                     destDirUri!!
                 )
                 ContextCompat.startForegroundService(this, serviceIntent)
-                progressBar.visibility = View.GONE
+                syncProgressContainer.visibility = View.VISIBLE
+                syncStatusTextView.text = "Starting service..."
+                progressBar.isIndeterminate = true
                 Toast.makeText(this, "Sync started in background", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "Invalid directories selected", Toast.LENGTH_SHORT).show()

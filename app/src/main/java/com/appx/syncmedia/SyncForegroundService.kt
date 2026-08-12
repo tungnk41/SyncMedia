@@ -34,6 +34,7 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
 
     @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        isServiceRunning = true
         createNotificationChannel()
 
         val sourceUriString = intent?.getStringExtra(EXTRA_SOURCE_URI)
@@ -46,6 +47,7 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
         }
 
         startAsForeground(buildProgressNotification(0, 0, 0))
+        sendSyncStartedBroadcast()
 
         serviceScope.launch {
             try {
@@ -80,13 +82,14 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
             NOTIFICATION_PROGRESS_ID,
             buildProgressNotification(progress, current, total)
         )
+        sendProgressBroadcast(progress, current, total)
     }
 
     @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
     override fun onSyncComplete(synced: Int, total: Int) {
         serviceScope.launch(Dispatchers.Main) {
             val message = if (synced == total) {
-                "Sync complete! All $total files have been copied to $destName"
+                "Sync complete! $total files have been copied to $destName"
             } else {
                 "Sync finished. $synced of $total files were copied to $destName"
             }
@@ -102,12 +105,40 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
             .build()
 
         NotificationManagerCompat.from(this).notify(NOTIFICATION_COMPLETE_ID, completeNotification)
+        sendSyncCompleteBroadcast(synced, total)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    private fun sendProgressBroadcast(progress: Int, current: Int, total: Int) {
+        val intent = Intent(ACTION_SYNC_PROGRESS).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_PROGRESS, progress)
+            putExtra(EXTRA_CURRENT, current)
+            putExtra(EXTRA_TOTAL, total)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun sendSyncCompleteBroadcast(synced: Int, total: Int) {
+        val intent = Intent(ACTION_SYNC_COMPLETE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_SYNCED, synced)
+            putExtra(EXTRA_TOTAL, total)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun sendSyncStartedBroadcast() {
+        val intent = Intent(ACTION_SYNC_STARTED).apply {
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
     override fun onDestroy() {
         serviceScope.cancel()
+        isServiceRunning = false
         super.onDestroy()
     }
 
@@ -153,6 +184,7 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
             .build()
 
         NotificationManagerCompat.from(this).notify(NOTIFICATION_COMPLETE_ID, failedNotification)
+        sendSyncCompleteBroadcast(0, 0)
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -201,6 +233,18 @@ class SyncForegroundService : Service(), FileSyncer.SyncProgressListener {
                 putExtra(EXTRA_DEST_URI, destUri.toString())
             }
         }
+
+        const val ACTION_SYNC_PROGRESS = "com.appx.syncmedia.ACTION_SYNC_PROGRESS"
+        const val ACTION_SYNC_COMPLETE = "com.appx.syncmedia.ACTION_SYNC_COMPLETE"
+        const val ACTION_SYNC_STARTED = "com.appx.syncmedia.ACTION_SYNC_STARTED"
+
+        const val EXTRA_PROGRESS = "extra_progress"
+        const val EXTRA_CURRENT = "extra_current"
+        const val EXTRA_TOTAL = "extra_total"
+        const val EXTRA_SYNCED = "extra_synced"
+
+        @Volatile
+        var isServiceRunning = false
     }
 }
 

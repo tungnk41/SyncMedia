@@ -24,6 +24,9 @@ class FileSyncer {
         val totalFiles = countFiles(sourceDir, destDir)
         val syncContext = SyncContext(totalFiles)
 
+        // Initial update to show 0% progress and total file count
+        listener.onProgressUpdate(0, 0, totalFiles)
+
         syncDirectory(context, sourceDir, destDir, listener, syncContext)
         listener.onSyncComplete(syncContext.copiedFiles, totalFiles)
         Log.d(TAG, "Sync finished. Copied ${syncContext.copiedFiles} of $totalFiles files.")
@@ -41,9 +44,10 @@ class FileSyncer {
     private fun countFiles(sourceDir: DocumentFile, destDir: DocumentFile? = null): Int {
         var count = 0
         if (sourceDir.isDirectory) {
+            val sourceFiles = sourceDir.listFiles()
             val destFilesByName = destDir?.listFiles()?.associateBy { it.name } ?: emptyMap()
 
-            for (file in sourceDir.listFiles()) {
+            for (file in sourceFiles) {
                 if (isHidden(file)) continue
                 val fileName = file.name ?: continue
 
@@ -73,42 +77,40 @@ class FileSyncer {
             return
         }
 
-        val sourceEntriesByName = source
-            .listFiles()
+        val sourceFiles = source.listFiles()
+        val destFiles = destination.listFiles()
+
+        val sourceEntriesByName = sourceFiles
             .filter { !isHidden(it) }
             .mapNotNull { entry -> entry.name?.let { it to entry } }
             .toMap()
 
-        for (destEntry in destination.listFiles()) {
+        val destEntriesByName = destFiles
+            .mapNotNull { entry -> entry.name?.let { it to entry } }
+            .toMap()
+
+        // Delete extra entries in destination
+        for (destEntry in destFiles) {
             val destName = destEntry.name ?: continue
             if (destName.startsWith(".")) continue
-            val sourceEntry = sourceEntriesByName[destName]
-
-            if (sourceEntry == null) {
+            if (!sourceEntriesByName.containsKey(destName)) {
                 Log.d(TAG, "Deleting extra entry in destination: $destName")
-                deleteRecursively(destEntry)
-                continue
-            }
-
-            if (destEntry.isDirectory != sourceEntry.isDirectory) {
-                Log.d(TAG, "Type mismatch for '$destName', deleting destination entry")
                 deleteRecursively(destEntry)
             }
         }
 
-        for (file in source.listFiles()) {
-            val fileName = file.name ?: continue
-            if (isHidden(file)) continue
-            val existingFile = destination.findFile(fileName)
+        // Sync files and directories
+        for ((fileName, sourceFile) in sourceEntriesByName) {
+            val existingDestEntry = destEntriesByName[fileName]
             val targetFile: DocumentFile?
 
-            if (file.isDirectory) {
-                targetFile = if (existingFile != null) {
-                    if (!existingFile.isDirectory) {
-                        deleteRecursively(existingFile)
+            if (sourceFile.isDirectory) {
+                targetFile = if (existingDestEntry != null) {
+                    if (!existingDestEntry.isDirectory) {
+                        deleteRecursively(existingDestEntry)
                         destination.createDirectory(fileName)
                     } else {
-                        existingFile
+                        existingDestEntry
                     }
                 } else {
                     Log.i(TAG, "Creating directory: $fileName")
@@ -116,28 +118,28 @@ class FileSyncer {
                 }
 
                 if (targetFile != null) {
-                    syncDirectory(context, file, targetFile, listener, syncContext)
+                    syncDirectory(context, sourceFile, targetFile, listener, syncContext)
                 } else {
                     Log.e(TAG, "Failed to create or access directory: $fileName")
                 }
             } else { // It's a file
-                targetFile = if (existingFile != null) {
-                    if (existingFile.isDirectory) {
-                        deleteRecursively(existingFile)
-                        destination.createFile(file.type ?: "application/octet-stream", fileName)
+                targetFile = if (existingDestEntry != null) {
+                    if (existingDestEntry.isDirectory) {
+                        deleteRecursively(existingDestEntry)
+                        destination.createFile(sourceFile.type ?: "application/octet-stream", fileName)
                     } else {
-                        existingFile
+                        existingDestEntry
                     }
                 } else {
-                    destination.createFile(file.type ?: "application/octet-stream", fileName)
+                    destination.createFile(sourceFile.type ?: "application/octet-stream", fileName)
                 }
 
                 if (targetFile != null) {
-                    val alreadyExists = existingFile != null && !existingFile.isDirectory
+                    val alreadyExists = existingDestEntry != null && !existingDestEntry.isDirectory
                     if (alreadyExists) {
                         Log.i(TAG, "Skipped (already exists): $fileName")
                     } else {
-                        copyFile(context, file, targetFile, listener, syncContext)
+                        copyFile(context, sourceFile, targetFile, listener, syncContext)
                     }
                 } else {
                     Log.e(TAG, "Failed to create or access file: $fileName")
@@ -161,7 +163,11 @@ class FileSyncer {
                     inputStream.copyTo(outputStream)
                     syncContext.copiedFiles++
                     Log.i(TAG, "[${syncContext.copiedFiles}/${syncContext.totalFiles}] Synced: $fileName")
-                    val progress = (syncContext.copiedFiles * 100 / syncContext.totalFiles)
+                    val progress = if (syncContext.totalFiles > 0) {
+                        (syncContext.copiedFiles * 100 / syncContext.totalFiles)
+                    } else {
+                        100
+                    }
                     listener.onProgressUpdate(progress, syncContext.copiedFiles, syncContext.totalFiles)
                 } ?: Log.e(TAG, "Could not open output stream for $fileName")
             } ?: Log.e(TAG, "Could not open input stream for $fileName")
